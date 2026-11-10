@@ -32,13 +32,19 @@ const pinErr = (r) => r.setup ? J({ error: "관리자 비밀번호가 아직 없
   : r.locked ? J({ error: `비밀번호를 여러 번 틀려서 ${r.locked}분 동안 잠겼어요.` }, 429)
   : J({ error: "관리자 비밀번호가 맞지 않아요." }, 403);
 
+async function canAll(st, as) {
+  if (!okId(as)) return false;
+  const list = (await st.get("cfg/managers", { type: "json" })) || [];
+  return list.some((m) => m.id === as && m.all);
+}
+
 function cleanMgrs(list) {
   if (!Array.isArray(list)) return null;
   const out = [];
   for (const m of list.slice(0, 60)) {
     const name = clean(m && m.name, 20); if (!name) continue;
     const id = okId(m.id) ? m.id : "m" + randomBytes(5).toString("hex");
-    out.push({ id, name, tel: clean(m.tel, 20) });
+    out.push({ id, name, tel: clean(m.tel, 20), all: !!m.all });
   }
   return out;
 }
@@ -85,8 +91,9 @@ export default async (req) => {
       return J({ ok: true, managers: list });
     }
     if (path === "quotes" && m === "GET") {
-      const mg = url.searchParams.get("mgr") || "all";
+      const mg = url.searchParams.get("mgr") || "all", as = url.searchParams.get("as") || "";
       if (mg !== "all" && !okId(mg)) return J({ error: "매니저가 올바르지 않아요." }, 400);
+      if (mg !== as && !(await canAll(st, as))) return J({ error: "다른 매니저의 견적은 볼 수 없어요." }, 403);
       const { blobs } = await st.list({ prefix: mg === "all" ? "q/" : `q/${mg}/` });
       const recs = (await Promise.all(blobs.slice(0, 400).map((b) => st.get(b.key, { type: "json" }).catch(() => null)))).filter(Boolean);
       recs.sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
@@ -102,8 +109,9 @@ export default async (req) => {
       return J({ ok: true, savedAt: rec.savedAt });
     }
     if (path === "quotes" && m === "DELETE") {
-      const mg = url.searchParams.get("mgr"), id = url.searchParams.get("id");
+      const mg = url.searchParams.get("mgr"), id = url.searchParams.get("id"), as = url.searchParams.get("as") || "";
       if (!okId(mg) || !okId(id)) return J({ error: "견적 정보가 올바르지 않아요." }, 400);
+      if (mg !== as && !(await canAll(st, as))) return J({ error: "다른 매니저의 견적은 지울 수 없어요." }, 403);
       await st.delete(`q/${mg}/${id}`);
       return J({ ok: true });
     }
