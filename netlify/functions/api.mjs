@@ -1,0 +1,116 @@
+// 전자랜드 안동점 에어컨 가격표 — 직원용 공유 저장 기능
+// 매니저 목록, 관리자 비밀번호, 매니저별 견적을 넷리파이 저장 공간에 보관합니다.
+import { getStore } from "@netlify/blobs";
+import { createHash, pbkdf2Sync, randomBytes, timingSafeEqual } from "node:crypto";
+
+// 암호화된 홈페이지 안에만 들어 있는 직원 열쇠의 지문(sha256)
+const STAFF_HASH = "1a164e05fc31cb815533c71f50ae87b6f7bc3090d3f4ad95db6327c344d13c44";
+
+const J = (o, s = 200) => new Response(JSON.stringify(o), { status: s, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+const sha = (s) => createHash("sha256").update(String(s)).digest("hex");
+const clean = (s, n) => String(s ?? "").replace(/[\u0000-\u001f]/g, "").trim().slice(0, n);
+const okId = (s) => /^[A-Za-z0-9_-]{1,40}$/.test(String(s || ""));
+
+function hashPin(pin, salt) { return pbkdf2Sync(String(pin), salt, 120000, 32, "sha256").toString("hex"); }
+function same(a, b) { const x = Buffer.from(a), y = Buffer.from(b); return x.length === y.length && timingSafeEqual(x, y); }
+
+async function checkPin(st, pin) {
+  const cfg = await st.get("cfg/admin", { type: "json" });
+  if (!cfg) return { ok: false, setup: true };
+  const now = Date.now();
+  if (cfg.lockUntil && cfg.lockUntil > now) return { ok: false, locked: Math.ceil((cfg.lockUntil - now) / 60000) };
+  if (same(hashPin(pin, cfg.salt), cfg.hash)) {
+    if (cfg.fails) { cfg.fails = 0; cfg.lockUntil = 0; await st.setJSON("cfg/admin", cfg); }
+    return { ok: true, cfg };
+  }
+  cfg.fails = (cfg.fails || 0) + 1;
+  if (cfg.fails >= 5) { cfg.lockUntil = now + 10 * 60000; cfg.fails = 0; }
+  await st.setJSON("cfg/admin", cfg);
+  return { ok: false };
+}
+const pinErr = (r) => r.setup ? J({ error: "관리자 비밀번호가 아직 없어요.", setup: true }, 409)
+  : r.locked ? J({ error: `비밀번호를 여러 번 틀려서 ${r.locked}분 동안 잠겼어요.` }, 429)
+  : J({ error: "관리자 비밀번호가 맞지 않아요." }, 403);
+
+function cleanMgrs(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  for (const m of list.slice(0, 60)) {
+    const name = clean(m && m.name, 20); if (!name) continue;
+    const id = okId(m.id) ? m.id : "m" + randomBytes(5).toString("hex");
+    out.push({ id, name, tel: clean(m.tel, 20) });
+  }
+  return out;
+}
+
+export default async (req) => {
+  const key = req.headers.get("x-key") || "";
+  if (!key || sha(key) !== STAFF_HASH) return J({ error: "권한이 없어요." }, 401);
+  const st = getStore({ name: "aircon", consistency: "strong" });
+  const url = new URL(req.url);
+  const path = url.pathname.replace(/^\/api\/?/, "").replace(/\/$/, "");
+  const m = req.method;
+  let body = {};
+  if (m === "POST" || m === "PUT") { try { body = await req.json(); } catch { body = {}; } }
+
+  try {
+    if (path === "managers" && m === "GET") {
+      const [list, cfg] = await Promise.all([st.get("cfg/managers", { type: "json" }), st.get("cfg/admin", { type: "json" })]);
+      return J({ managers: list || [], adminSet: !!cfg });
+    }
+    if (path === "admin/setup" && m === "POST") {
+      if (await st.get("cfg/admin")) return J({ error: "관리자 비밀번호가 이미 있어요." }, 409);
+      const pin = String(body.pin || "");
+      if (!/^\d{4,12}$/.test(pin)) return J({ error: "숫자 4~12자리로 정해 주세요." }, 400);
+      const salt = randomBytes(16).toString("hex");
+      await st.setJSON("cfg/admin", { salt, hash: hashPin(pin, salt), fails: 0, lockUntil: 0 });
+      return J({ ok: true });
+    }
+    if (path === "admin/login" && m === "POST") {
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
+      return J({ ok: true });
+    }
+    if (path === "admin/pin" && m === "POST") {
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
+      const np = String(body.newPin || "");
+      if (!/^\d{4,12}$/.test(np)) return J({ error: "새 비밀번호는 숫자 4~12자리로 정해 주세요." }, 400);
+      const salt = randomBytes(16).toString("hex");
+      await st.setJSON("cfg/admin", { salt, hash: hashPin(np, salt), fails: 0, lockUntil: 0 });
+      return J({ ok: true });
+    }
+    if (path === "managers" && m === "PUT") {
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
+      const list = cleanMgrs(body.managers); if (!list) return J({ error: "목록이 올바르지 않아요." }, 400);
+      await st.setJSON("cfg/managers", list);
+      return J({ ok: true, managers: list });
+    }
+    if (path === "quotes" && m === "GET") {
+      const mg = url.searchParams.get("mgr") || "all";
+      if (mg !== "all" && !okId(mg)) return J({ error: "매니저가 올바르지 않아요." }, 400);
+      const { blobs } = await st.list({ prefix: mg === "all" ? "q/" : `q/${mg}/` });
+      const recs = (await Promise.all(blobs.slice(0, 400).map((b) => st.get(b.key, { type: "json" }).catch(() => null)))).filter(Boolean);
+      recs.sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt)));
+      return J({ quotes: recs.slice(0, 300) });
+    }
+    if (path === "quotes" && m === "PUT") {
+      const rec = body.rec || {};
+      if (!okId(rec.id) || !okId(rec.mgrId)) return J({ error: "견적 정보가 올바르지 않아요." }, 400);
+      const txt = JSON.stringify(rec); if (txt.length > 400000) return J({ error: "견적이 너무 커요." }, 413);
+      rec.savedAt = new Date().toISOString();
+      if (okId(body.prevMgr) && body.prevMgr !== rec.mgrId) await st.delete(`q/${body.prevMgr}/${rec.id}`);
+      await st.setJSON(`q/${rec.mgrId}/${rec.id}`, rec);
+      return J({ ok: true, savedAt: rec.savedAt });
+    }
+    if (path === "quotes" && m === "DELETE") {
+      const mg = url.searchParams.get("mgr"), id = url.searchParams.get("id");
+      if (!okId(mg) || !okId(id)) return J({ error: "견적 정보가 올바르지 않아요." }, 400);
+      await st.delete(`q/${mg}/${id}`);
+      return J({ ok: true });
+    }
+    return J({ error: "없는 기능이에요." }, 404);
+  } catch (e) {
+    return J({ error: "저장 공간에 연결하지 못했어요. 잠시 후 다시 해 주세요." }, 500);
+  }
+};
+
+export const config = { path: "/api/*" };
