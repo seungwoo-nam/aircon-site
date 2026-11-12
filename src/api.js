@@ -50,6 +50,13 @@ async function canAll(st, as) {
   const list = (await st.get("cfg/managers", { type: "json" })) || [];
   return list.some((m) => m.id === as && m.all);
 }
+async function bugRank(st, b, list) {
+  b = b || (await st.get("game/bug", { type: "json" })) || {};
+  list = list || (await st.get("cfg/managers", { type: "json" })) || [];
+  return list.filter((x) => b[x.id] && b[x.id].best > 0)
+    .map((x) => ({ id: x.id, name: x.name, score: b[x.id].best, at: b[x.id].at || "", plays: b[x.id].plays || 0 }))
+    .sort((p, q) => q.score - p.score || String(p.at).localeCompare(String(q.at)));
+}
 function cleanMgrs(list) {
   if (!Array.isArray(list)) return null;
   const out = [];
@@ -134,6 +141,21 @@ export async function onRequest({ request: req, env }) {
       }
       await st.setJSON("cfg/managers", list);
       return J({ ok: true, managers: list.length, quotes: n });
+    }
+    if (path === "bug" && m === "GET") {
+      return J({ rank: await bugRank(st) });
+    }
+    if (path === "bug" && m === "POST") {
+      const as = String(body.as || ""), sc = Math.floor(Number(body.score));
+      if (!okId(as) || !(sc >= 0 && sc <= 80)) return J({ error: "기록이 올바르지 않아요." }, 400);
+      const list = (await st.get("cfg/managers", { type: "json" })) || [];
+      if (!list.some((x) => x.id === as)) return J({ error: "매니저를 찾지 못했어요." }, 404);
+      const b = (await st.get("game/bug", { type: "json" })) || {};
+      const cur = b[as] || { best: 0, plays: 0 };
+      const isBest = sc > (cur.best || 0);
+      b[as] = { best: Math.max(cur.best || 0, sc), at: isBest ? new Date().toISOString() : cur.at, plays: (cur.plays || 0) + 1 };
+      await st.setJSON("game/bug", b);
+      return J({ ok: true, best: isBest, rank: await bugRank(st, b, list) });
     }
     if (path === "quotes" && m === "GET") {
       const mg = url.searchParams.get("mgr") || "all", as = url.searchParams.get("as") || "";
