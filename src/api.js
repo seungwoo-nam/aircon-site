@@ -142,6 +142,23 @@ export async function onRequest({ request: req, env }) {
       await st.setJSON("cfg/managers", list);
       return J({ ok: true, managers: list.length, quotes: n });
     }
+    if (path === "log" && m === "POST") {
+      const ev = ["enter", "pick", "logout", "idle"].includes(body.ev) ? body.ev : "enter";
+      const as = okId(body.as) ? body.as : "";
+      let name = "";
+      if (as) { const list = (await st.get("cfg/managers", { type: "json" })) || []; const x = list.find((y) => y.id === as); name = x ? x.name : ""; }
+      const cf = req.cf || {};
+      const now = Date.now();
+      const meta = { t: now, ev, mid: as, name, dev: clean(body.dev, 60), ip: clean(req.headers.get("cf-connecting-ip"), 45), city: clean(cf.city, 30), isp: clean(cf.asOrganization, 40) };
+      await env.KV.put(`log/${String(9e13 - now).padStart(14, "0")}-${rand(3)}`, "", { metadata: meta, expirationTtl: 90 * 86400 });
+      return J({ ok: true });
+    }
+    if (path === "admin/logs" && m === "POST") {
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
+      const out = []; let cursor;
+      do { const x = await env.KV.list({ prefix: "log/", cursor, limit: 1000 }); x.keys.forEach((k) => k.metadata && out.push(k.metadata)); cursor = x.list_complete ? null : x.cursor; } while (cursor && out.length < 3000);
+      return J({ logs: out });
+    }
     if (path === "bug" && m === "GET") {
       return J({ rank: await bugRank(st) });
     }
