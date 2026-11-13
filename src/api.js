@@ -153,6 +153,31 @@ export async function onRequest({ request: req, env }) {
       await env.KV.put(`log/${String(9e13 - now).padStart(14, "0")}-${rand(3)}`, "", { metadata: meta, expirationTtl: 90 * 86400 });
       return J({ ok: true });
     }
+    if (path === "act" && m === "POST") {
+      const as = okId(body.as) ? body.as : "", sid = String(body.sid || "");
+      if (!/^[a-z0-9]{6,16}$/.test(sid)) return J({ error: "기록이 올바르지 않아요." }, 400);
+      const start = Math.floor(Number(body.start)) || Date.now();
+      const acts = (Array.isArray(body.acts) ? body.acts : []).slice(-400).map((a) => ({ t: Math.floor(Number(a && a.t)) || 0, k: clean(a && a.k, 12), x: clean(a && a.x, 80), tab: clean(a && a.tab, 24) })).filter((a) => a.t && a.k);
+      if (!acts.length) return J({ ok: true });
+      let name = "";
+      if (as) { const list = (await st.get("cfg/managers", { type: "json" })) || []; const x = list.find((y) => y.id === as); name = x ? x.name : ""; }
+      const cnt = {}; acts.forEach((a) => { cnt[a.k] = (cnt[a.k] || 0) + 1; });
+      const meta = { t: start, last: acts[acts.length - 1].t, mid: as, name, n: acts.length, dev: clean(body.dev, 60), cnt };
+      await env.KV.put(`act/${String(9e13 - start).padStart(14, "0")}-${sid}`, JSON.stringify({ acts }), { metadata: meta, expirationTtl: 90 * 86400 });
+      return J({ ok: true });
+    }
+    if (path === "admin/acts" && m === "POST") {
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
+      if (body.key) {
+        const k = String(body.key);
+        if (!/^act\/[0-9]{14}-[a-z0-9]{6,16}$/.test(k)) return J({ error: "기록을 찾지 못했어요." }, 400);
+        const v = await env.KV.get(k, { type: "json" });
+        return J({ acts: (v && v.acts) || [] });
+      }
+      const out = []; let cursor;
+      do { const x = await env.KV.list({ prefix: "act/", cursor, limit: 1000 }); x.keys.forEach((k) => k.metadata && out.push(Object.assign({ key: k.name }, k.metadata))); cursor = x.list_complete ? null : x.cursor; } while (cursor && out.length < 3000);
+      return J({ sessions: out });
+    }
     if (path === "admin/logs" && m === "POST") {
       const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
       const out = []; let cursor;
