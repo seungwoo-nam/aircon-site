@@ -212,7 +212,7 @@ export async function onRequest({ request: req, env }) {
       const rec = body.rec || {};
       if (!okId(rec.id) || !okId(rec.mgrId)) return J({ error: "견적 정보가 올바르지 않아요." }, 400);
       const txt = JSON.stringify(rec); if (txt.length > 400000) return J({ error: "견적이 너무 커요." }, 413);
-      rec.savedAt = new Date().toISOString();
+      if (!(body.keep && typeof rec.savedAt === "string" && !isNaN(Date.parse(rec.savedAt)))) rec.savedAt = new Date().toISOString();
       if (okId(body.prevMgr) && body.prevMgr !== rec.mgrId) await st.delete(`q/${body.prevMgr}/${rec.id}`);
       await st.setJSON(`q/${rec.mgrId}/${rec.id}`, rec);
       return J({ ok: true, savedAt: rec.savedAt });
