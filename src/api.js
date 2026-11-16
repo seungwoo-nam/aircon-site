@@ -218,9 +218,12 @@ export async function onRequest({ request: req, env }) {
       return J({ ok: true, savedAt: rec.savedAt });
     }
     if (path === "quotes" && m === "DELETE") {
-      const mg = url.searchParams.get("mgr"), id = url.searchParams.get("id"), as = url.searchParams.get("as") || "";
+      return J({ error: "견적 삭제는 관리자 승인이 필요해요." }, 403);
+    }
+    if (path === "quotes/delete" && m === "POST") {
+      const mg = String(body.mgr || ""), id = String(body.id || "");
       if (!okId(mg) || !okId(id)) return J({ error: "견적 정보가 올바르지 않아요." }, 400);
-      if (mg !== as && !(await canAll(st, as))) return J({ error: "다른 매니저의 견적은 지울 수 없어요." }, 403);
+      const r = await checkPin(st, body.pin); if (!r.ok) return pinErr(r);
       await st.delete(`q/${mg}/${id}`);
       return J({ ok: true });
     }
